@@ -1,7 +1,11 @@
 from bs4 import BeautifulSoup
 import requests
 
-MAIN_PAGE_URL = "https://www.alexa.com/topsites/"
+TOPSITE_URL = "https://www.alexa.com/topsites/"
+
+UNRESPONSIVE_COUNTRY_PAGES = [
+    "Aland Islands", # just added (refreshed topsites and newly appeared, but link is down at the moment)
+]
 
 # TODO(@pciocirlan): improve exceptions
 
@@ -12,14 +16,18 @@ def main():
         raise Exception(f"Get country links: {e}")
 
     for link in country_pages_links:
-        print(link)
+        if link[0] in UNRESPONSIVE_COUNTRY_PAGES:
+            continue
+
+        print(f"Looking at {link[0]}...")
+        top_50_sites = get_top_country_sites(link[1])
+
+        print(top_50_sites)
+        print()
 
 
 def get_country_pages_links():
-    try:
-        main_page_contents = get_page_content(MAIN_PAGE_URL + 'countries')
-    except Exception as e:
-        raise Exception(f"Failed to retrieve page contents: {e}")
+    main_page_contents = get_page_content(TOPSITE_URL + 'countries')
 
     parsed_html = BeautifulSoup(main_page_contents, 'html.parser')
 
@@ -29,16 +37,34 @@ def get_country_pages_links():
     for country_list in country_lists:
         links = country_list.find_all("a")
 
-        country_links += [MAIN_PAGE_URL + link['href'] for link in links]        
+        country_links += [(link.text, TOPSITE_URL + link['href']) for link in links]        
 
     return country_links
 
+
+def get_top_country_sites(url):
+    # print(f"Looking at: {url}")
+
+    country_page_contents = get_page_content(url)
+
+    parsed_html = BeautifulSoup(country_page_contents, 'html.parser')
+
+    site_blocks = parsed_html.find_all("div", class_="site-listing")
+
+    top_sites = list()
+
+    for site_block in site_blocks:
+        site_anchor = site_block.find("a")
+
+        top_sites += [site_anchor.text]
+
+    return top_sites
 
 def get_page_content(url):
     response = requests.get(url)
 
     if response.status_code != 200:
-        raise Exception("Failed GET request")
+        raise Exception(f"Failed to retrieve page contents: status code {response.status_code}")
 
     return response.text
 
