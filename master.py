@@ -1,166 +1,164 @@
-from bs4 import BeautifulSoup
 import subprocess
-import traceback
 import json
 import sys
 import os
 
-from common import get_page_content, open_rabbitmq_channel
-from common import parse_arguments, DEFAULT_RABBITMQ_QUEUE_NAME
-from common import DEBUG_WORKER_INPUT_FILE
+from bs4 import BeautifulSoup
+
+from common import WorkerPoolCommon
 
 # TODO(@pciocirlan): improve exceptions
 # TODO(@pciocirlan): add logger (to .log file)
 # TODO(@pciocirlan): PEP documentation
 
-# flag -> (argument count, default)
-OPTIONS = {
-    "--test": (0, False),
-    "--queue": (1, DEFAULT_RABBITMQ_QUEUE_NAME),
-    "--worker-count": (1, 16)
-}
 
-TOPSITE_URL = "https://www.alexa.com/topsites/"
+class Master(WorkerPoolCommon):
+    # flag -> (argument count, default)
+    OPTIONS = {
+        "--test": (0, False),
+        "--queue": (1, WorkerPoolCommon.DEFAULT_RABBITMQ_QUEUE_NAME),
+        "--worker-count": (1, 16)
+    }
 
-UNRESPONSIVE_COUNTRY_PAGES = [
-    # just added (refreshed topsites and newly appeared, but link is down at the moment)
-    "Aland Islands",
-]
+    TOPSITE_URL = "https://www.alexa.com/topsites/"
 
-open_subprocesses = list()
-settings = {}
+    # UNRESPONSIVE_COUNTRY_PAGES = [
+    # # just added (refreshed topsites and newly appeared, but link is down at the moment)
+    # # "Aland Islands",
+    # ]
 
-def main():
-    global settings
-    settings = parse_arguments(sys.argv[1:], OPTIONS)
+    def __init__(self, args):
+        super(Master, self).__init__()
+        self._settings = self.parse_arguments(args, self.OPTIONS)
 
-    try:
-        country_pages_links = get_country_pages_links()
-    except Exception as e:
-        raise Exception(f"Get country links: {e}")
+    def __enter__(self):
+        self._open_subprocesses = list()
 
-    conn, ch = None, None
-    if not settings["--test"]:
-        conn, ch = open_rabbitmq_channel(settings["--queue"], clear_queue=True)
+        if not self._settings["--test"]:
+            self._conn, self._ch = self.open_rabbitmq_channel(
+                self._settings["--queue"], clear_queue=True)
 
-        global open_subprocesses
-        for _ in range(settings["--worker-count"]):
-            proc = subprocess.Popen(["python", "worker.py"])
-            open_subprocesses.append(proc)
+            for _ in range(self._settings["--worker-count"]):
+                script_directory = os.path.dirname(os.path.realpath(__file__))
+                worker_script_path = os.path.join(
+                    script_directory, "worker.py")
+                proc = subprocess.Popen(["python", worker_script_path])
+                self._open_subprocesses.append(proc)
 
-    for link in country_pages_links:
-        if link['country'] in UNRESPONSIVE_COUNTRY_PAGES:
-            continue
+        return self
 
-        print(
-            f"Looking at {link['country']} top sites ... ", end="", flush=True)
+    def __exit__(self, exception_type, exception_value, traceback):
+        for proc in self._open_subprocesses:
+            # TODO(@pciocirlan): log info
+            if proc.poll() is None:
+                proc.kill()
+
+        self._ch.close()
+        self._conn.close()
+
+    def run(self):
         try:
-            top_sites = get_top_country_sites(link['url'])
+            country_pages_links = self.get_country_pages_links()
         except Exception as e:
-            print(f"failed: {e}")
-            continue
-        print("done!")
+            raise Exception(f"Get country links: {e}")
 
-        send_tasks(ch, link['country'], top_sites)
+        for link in country_pages_links:
+            # if link['country'] in self.UNRESPONSIVE_COUNTRY_PAGES:
+            #     continue
 
-    if not settings["--test"]:
-        send_stop_messages(ch)
+            print(
+                f"Looking at {link['country']} top sites ... ", end="", flush=True)
+            try:
+                top_sites = self.get_top_country_sites(link['url'])
+            except Exception as e:
+                print(f"failed: {e}")
+                continue
 
-    if conn is not None:
-        conn.close()
+            print("done!")
 
+            self.send_tasks(link['country'], top_sites)
 
-def get_country_pages_links():
-    main_page_contents = get_page_content(TOPSITE_URL + 'countries')
+        if not self._settings["--test"]:
+            self.send_stop_messages(self._ch)
 
-    parsed_html = BeautifulSoup(main_page_contents, 'html.parser')
+        if self._conn is not None:
+            self._conn.close()
 
-    country_links = list()
+    @classmethod
+    def get_country_pages_links(cls):
+        main_page_contents = cls.get_page_content(
+            cls.TOPSITE_URL + 'countries')
+        parsed_html = BeautifulSoup(main_page_contents, 'html.parser')
+        country_links = list()
 
-    country_lists = parsed_html.find_all("ul", class_="countries")
-    for country_list in country_lists:
-        links = country_list.find_all("a")
+        country_lists = parsed_html.find_all("ul", class_="countries")
+        for country_list in country_lists:
+            links = country_list.find_all("a")
 
-        country_links += [{"country": link.text,
-                           "url": TOPSITE_URL + link['href']} for link in links]
+            country_links += [{"country": link.text,
+                               "url": cls.TOPSITE_URL + link['href']} for link in links]
 
-    return country_links
+        return country_links
 
+    @classmethod
+    def get_top_country_sites(cls, url):
+        # print(f"Looking at: {url}")
 
-def get_top_country_sites(url):
-    # print(f"Looking at: {url}")
+        top_sites = list()
+        country_page_contents = cls.get_page_content(url)
+        parsed_html = BeautifulSoup(country_page_contents, 'html.parser')
+        site_blocks = parsed_html.find_all("div", class_="site-listing")
 
-    country_page_contents = get_page_content(url)
+        for site_block in site_blocks:
+            site_anchor = site_block.find("a")
 
-    parsed_html = BeautifulSoup(country_page_contents, 'html.parser')
+            top_sites += [site_anchor.text]
 
-    site_blocks = parsed_html.find_all("div", class_="site-listing")
+        return top_sites
 
-    top_sites = list()
+    def send_tasks(self, folder_name, top_sites):
+        jsons = list()
+        for rank, website in enumerate(top_sites, 1):
+            filename = f"%(index)02d %(website)s.html" % {
+                "index": rank,
+                "website": website
+            }
 
-    for site_block in site_blocks:
-        site_anchor = site_block.find("a")
+            # "topsites/{country}/{index} {website}.html"
+            filepath = os.path.join("topsites", folder_name, filename)
+            website = f"http://{website}"
 
-        top_sites += [site_anchor.text]
+            obj = {
+                "Link": website,
+                "LocatieDisk": filepath
+            }
 
-    return top_sites
+            jsons += [obj]
 
+            if self._ch is not None:
+                obj_json = json.dumps(obj)
 
-def send_tasks(ch, folder_name, top_sites):
-    jsons = list()
-    for rank, website in enumerate(top_sites, 1):
-        filename = f"%(index)02d %(website)s.html" % {
-            "index": rank,
-            "website": website
-        }
+                self._ch.basic_publish(
+                    exchange='', routing_key=self._settings["--queue"], body=obj_json)
 
-        # "topsites/{country}/{index} {website}.html"
-        filepath = os.path.join("topsites", folder_name, filename)
-        website = f"http://{website}"
+                print(f"Sent {obj_json} to queue!")
 
-        obj = {
-            "Link": website,
-            "LocatieDisk": filepath
-        }
+        if self._settings["--test"]:
+            with open(self.DEBUG_WORKER_INPUT_FILE, "w") as fd:
+                json.dump(jsons, fd, indent=4)
+                exit(0)
 
-        jsons += [obj]
+    def send_stop_messages(self): 
+        for _ in range(self._settings["--worker-count"]):
+            obj_json = json.dumps({"action": "STOP"})
 
-        if ch is not None:
-            obj_json = json.dumps(obj)
-
-            ch.basic_publish(
-                exchange='', routing_key=settings["--queue"], body=obj_json)
-
-            print(f"Sent {obj_json} to queue!")
-
-    if settings["--test"]:
-        with open(DEBUG_WORKER_INPUT_FILE, "w") as fd:
-            json.dump(jsons, fd, indent=4)
-            exit(0)
-
-
-def send_stop_messages(ch):
-    for _ in range(settings["--worker-count"]):
-        obj_json = json.dumps({"action": "STOP"})
-
-        ch.basic_publish(
-            exchange='', routing_key=settings["--queue"], body=obj_json)
-
-
-def kill_subprocesses():
-    global open_subprocesses
-    for proc in open_subprocesses:
-        proc.kill()
+            self._ch.basic_publish(
+                exchange='', routing_key=self._settings["--queue"], body=obj_json)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print('Interrupted')
-        kill_subprocesses()
-        exit(0)
-    except Exception as e:
-        print(traceback.format_exc())
-        kill_subprocesses()
-        exit(-1)
+    with Master(sys.argv[1:]) as master:
+        try:
+            master.run()
+        except KeyboardInterrupt:
+            print('Interrupted.')

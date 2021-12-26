@@ -1,80 +1,80 @@
-import traceback
-import pika
 import json
 import sys
 import os
 
-from common import get_page_content, open_rabbitmq_channel
-from common import parse_arguments, DEFAULT_RABBITMQ_QUEUE_NAME
-from common import DEBUG_WORKER_INPUT_FILE
-
-# flag -> (argument count, default)
-OPTIONS = {
-    "--test": (0, False),
-    "--queue": (1, DEFAULT_RABBITMQ_QUEUE_NAME)
-}
-
-settings = {}
+from common import WorkerPoolCommon
 
 
-def main():
-    global settings
-    settings = parse_arguments(sys.argv[1:], OPTIONS)
+class Worker(WorkerPoolCommon):
+    # flag -> (argument count, default)
+    OPTIONS = {
+        "--test": (0, False),
+        "--queue": (1, WorkerPoolCommon.DEFAULT_RABBITMQ_QUEUE_NAME)
+    }
 
-    if settings["--test"]:
-        with open(DEBUG_WORKER_INPUT_FILE, "r") as fd:
-            data = json.load(fd)
+    def __init__(self, args):
+        super(Worker, self).__init__()
+        self._settings = self.parse_arguments(args, self.OPTIONS)
 
-        for top_site in data:
-            try:
-                download_to_disk(top_site)
-            except Exception as e:
-                print(f"Failed to download website {top_site['website']}: {e}")
+    def __enter__(self):
+        self._conn, self._ch = self.open_rabbitmq_channel(
+            self._settings["--queue"])
+        self._ch.basic_qos(prefetch_count=1)
 
-        exit(0)
+        return self
 
-    conn, ch = open_rabbitmq_channel(settings["--queue"])
-    ch.basic_qos(prefetch_count=1)
+        # if self._settings["--test"]:
+        #     with open(self.DEBUG_WORKER_INPUT_FILE, "r") as fd:
+        #         data = json.load(fd)
 
-    print(' [*] Waiting for messages. To exit press CTRL+C')
-    ch.basic_consume(
-        queue=settings["--queue"], auto_ack=False, on_message_callback=callback_rabbitmq)
-    ch.start_consuming()
+        #     for top_site in data:
+        #         try:
+        #             self.download_to_disk(top_site)
+        #         except Exception as e:
+        #             print(f"Failed to download website {top_site['website']}: {e}")
 
+        #     exit(0)
 
-def download_to_disk(info):
-    dirname = os.path.dirname(info['LocatieDisk'])
-    os.makedirs(dirname, exist_ok=True)
+    def __exit__(self, exception_type, exception_value, traceback):
+        self._ch.close()
+        self._conn.close()
 
-    web_page = get_page_content(info['Link'])
+    def run(self):
+        print(' [*] Waiting for messages. To exit press CTRL+C')
+        self._ch.basic_consume(
+            queue=self._settings["--queue"], auto_ack=False, on_message_callback=self.callback_rabbitmq)
+        self._ch.start_consuming()
 
-    with open(info['LocatieDisk'], "w", encoding="utf8") as fd:
-        fd.write(web_page)
+    @classmethod
+    def download_to_disk(cls, info):
+        dirname = os.path.dirname(info['LocatieDisk'])
+        os.makedirs(dirname, exist_ok=True)
 
+        web_page = cls.get_page_content(info['Link'])
 
-def callback_rabbitmq(ch, method, properties, body):
-    print(" [x] Received %r" % body)
+        with open(info['LocatieDisk'], "w", encoding="utf8") as fd:
+            fd.write(web_page)
 
-    message = json.loads(body)
+    def callback_rabbitmq(self, ch, method, properties, body):
+        print(" [x] Received %r" % body)
+        message = json.loads(body)
 
-    if "action" in message and message["action"] == "STOP":
-        print(" [x] STOP message received. Stopped.")
-        exit(0)
+        if "action" in message and message["action"] == "STOP":
+            print(" [x] STOP message received. Stopped consuming.")
+            self._ch.stop_consuming()
+            return
 
-    try:
-        download_to_disk(message)
-    except Exception as e:
-        print(f"Failed to download website {message['Link']}: {e}")
-    finally:
-        ch.basic_ack(delivery_tag=method.delivery_tag)
+        try:
+            self.download_to_disk(message)
+        except Exception as e:
+            print(f"Failed to download website {message['Link']}: {e}")
+        finally:
+            self._ch.basic_ack(delivery_tag=method.delivery_tag)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print('Interrupted')
-        exit(0)
-    except Exception:
-        print(traceback.format_exc())
-        exit(-1)
+    with Worker(sys.argv[1:]) as worker:
+        try:
+            worker.run()
+        except KeyboardInterrupt:
+            print('Interrupted.')
