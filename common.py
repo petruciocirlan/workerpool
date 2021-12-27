@@ -1,3 +1,7 @@
+import logging
+import sys
+import os
+
 import requests
 import pika
 
@@ -8,7 +12,7 @@ class WorkerPoolCommon:
 
     @staticmethod
     def get_page_content(url):
-        response = requests.get(url)
+        response = requests.get(url, timeout=10)
 
         if response.status_code != 200:
             raise Exception(
@@ -64,3 +68,25 @@ class WorkerPoolCommon:
                 settings[flag] = tuple(arguments)
 
         return settings
+
+    def open_logger(self, logger_name):
+        self._logger = logging.getLogger(logger_name)
+
+        script_directory = os.path.dirname(os.path.realpath(__file__))
+        logs_directory = os.path.join(script_directory, "logs/")
+        os.makedirs(logs_directory, exist_ok=True)
+        filepath = os.path.join(logs_directory, logger_name + '.log')
+
+        output_file_handler = logging.FileHandler(filepath)
+        stdout_handler = logging.StreamHandler(sys.stdout)
+
+        formatter = logging.Formatter(
+            "%(asctime)s.%(msecs)03d pid:%(process)5d [%(levelname)-8s] %(module)s - %(funcName)s: %(message)s", "%Y-%m-%d %H:%M:%S")
+
+        output_file_handler.setFormatter(formatter)
+        stdout_handler.setFormatter(formatter)
+
+        self._logger.addHandler(output_file_handler)
+        self._logger.addHandler(stdout_handler)
+
+        self._logger.setLevel(logging.DEBUG)

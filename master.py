@@ -8,81 +8,122 @@ from bs4 import BeautifulSoup
 from common import WorkerPoolCommon
 
 # TODO(@pciocirlan): improve exceptions
-# TODO(@pciocirlan): add logger (to .log file)
 # TODO(@pciocirlan): PEP documentation
 
 
 class Master(WorkerPoolCommon):
     # flag -> (argument count, default)
     OPTIONS = {
-        "--test": (0, False),
         "--queue": (1, WorkerPoolCommon.DEFAULT_RABBITMQ_QUEUE_NAME),
         "--worker-count": (1, 16)
     }
 
     TOPSITE_URL = "https://www.alexa.com/topsites/"
 
-    # UNRESPONSIVE_COUNTRY_PAGES = [
-    # # just added (refreshed topsites and newly appeared, but link is down at the moment)
-    # # "Aland Islands",
-    # ]
-
     def __init__(self, args):
         super(Master, self).__init__()
         self._settings = self.parse_arguments(args, self.OPTIONS)
+        self.open_logger("Master")
+        self._logger.info("Creating an instance of Master.")
 
     def __enter__(self):
+        self._logger.info("Connecting to RabbitMQ queue.")
+        self._conn, self._ch = self.open_rabbitmq_channel(
+            self._settings["--queue"], clear_queue=True)
+        self._logger.info("Done connecting to RabbitMQ queue.")
+
         self._open_subprocesses = list()
-
-        if not self._settings["--test"]:
-            self._conn, self._ch = self.open_rabbitmq_channel(
-                self._settings["--queue"], clear_queue=True)
-
-            for _ in range(self._settings["--worker-count"]):
-                script_directory = os.path.dirname(os.path.realpath(__file__))
-                worker_script_path = os.path.join(
-                    script_directory, "worker.py")
-                proc = subprocess.Popen(["python", worker_script_path])
-                self._open_subprocesses.append(proc)
+        worker_count = self._settings["--worker-count"]
+        self._logger.info(f"Creating {worker_count} workers.")
+        for _ in range(worker_count):
+            script_directory = os.path.dirname(os.path.realpath(__file__))
+            worker_script_path = os.path.join(
+                script_directory, "worker.py")
+            proc = subprocess.Popen(["python", worker_script_path])
+            self._open_subprocesses.append(proc)
+        self._logger.info(f"Done creating {worker_count} workers.")
 
         return self
 
     def __exit__(self, exception_type, exception_value, traceback):
         for proc in self._open_subprocesses:
-            # TODO(@pciocirlan): log info
             if proc.poll() is None:
-                proc.kill()
+                proc.terminate()
+                self._logger.info(
+                    f"Terminated unfinished worker with pid {proc.pid}.")
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    self._logger.info(
+                        f"Killed unresponding worker with pid {proc.pid}.")
 
-        self._ch.close()
-        self._conn.close()
+        if self._ch.is_open:
+            self._ch.close()
+
+        if self._conn.is_open:
+            self._conn.close()
 
     def run(self):
+        self._logger.info(
+            "Scraping links to each country's page with top 500 visited websites.")
         try:
             country_pages_links = self.get_country_pages_links()
         except Exception as e:
-            raise Exception(f"Get country links: {e}")
+            self._logger.error(
+                f"Failed to get links to top 500s for each country: {e}!")
+            raise Exception(f"Failed to get country links: {e}")
+        self._logger.info(
+            "Done scraping links to each country's page with top 500 visited websites.")
 
+        self._logger.info(
+            f"Scraping top 50 links for each country and sending tasks.")
         for link in country_pages_links:
-            # if link['country'] in self.UNRESPONSIVE_COUNTRY_PAGES:
-            #     continue
-
-            print(
-                f"Looking at {link['country']} top sites ... ", end="", flush=True)
+            self._logger.debug(
+                f"Scraping links to top sites of country {link['country']}.")
             try:
                 top_sites = self.get_top_country_sites(link['url'])
             except Exception as e:
-                print(f"failed: {e}")
+                self._logger.error(
+                    f"Failed to get top 50 most visited websites for country {link['country']}: {e}!")
                 continue
+            self._logger.debug(
+                f"Done craping links to top sites of country {link['country']}.")
 
-            print("done!")
-
+            self._logger.info(
+                f"Sending tasks to workers for country {link['country']}.")
             self.send_tasks(link['country'], top_sites)
+            self._logger.info(
+                f"Done sending tasks to workers for country {link['country']}.")
+        self._logger.info(
+            f"Done scraping top 50 links for each country and sending tasks.")
 
-        if not self._settings["--test"]:
-            self.send_stop_messages(self._ch)
+        self._logger.info("Sending 'STOP' tasks to all workers.")
+        self.send_stop_messages()
+        self._logger.info("Done sending 'STOP' tasks to all workers.")
 
-        if self._conn is not None:
-            self._conn.close()
+        self._logger.info("Closing RabbitMQ connections.")
+        self._ch.close()
+        self._conn.close()
+        self._logger.info("Done closing RabbitMQ connections.")
+
+        self._logger.info("Waiting for workers to finish.")
+        for proc in self._open_subprocesses:
+            proc.wait()
+        self._logger.info("Done waiting for workers to finish.")
+
+    def close_subprocesses(self):
+        for proc in self._open_subprocesses:
+            if proc.poll() is None:
+                proc.terminate()
+                self._logger.info(
+                    f"Terminated unfinished worker with pid {proc.pid}.")
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    self._logger.info(
+                        f"Killed unresponding worker with pid {proc.pid}.")
 
     @classmethod
     def get_country_pages_links(cls):
@@ -102,8 +143,6 @@ class Master(WorkerPoolCommon):
 
     @classmethod
     def get_top_country_sites(cls, url):
-        # print(f"Looking at: {url}")
-
         top_sites = list()
         country_page_contents = cls.get_page_content(url)
         parsed_html = BeautifulSoup(country_page_contents, 'html.parser')
@@ -141,14 +180,9 @@ class Master(WorkerPoolCommon):
                 self._ch.basic_publish(
                     exchange='', routing_key=self._settings["--queue"], body=obj_json)
 
-                print(f"Sent {obj_json} to queue!")
+                self._logger.debug(f"Sent {obj_json} to queue.")
 
-        if self._settings["--test"]:
-            with open(self.DEBUG_WORKER_INPUT_FILE, "w") as fd:
-                json.dump(jsons, fd, indent=4)
-                exit(0)
-
-    def send_stop_messages(self): 
+    def send_stop_messages(self):
         for _ in range(self._settings["--worker-count"]):
             obj_json = json.dumps({"action": "STOP"})
 

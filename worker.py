@@ -8,42 +8,34 @@ from common import WorkerPoolCommon
 class Worker(WorkerPoolCommon):
     # flag -> (argument count, default)
     OPTIONS = {
-        "--test": (0, False),
         "--queue": (1, WorkerPoolCommon.DEFAULT_RABBITMQ_QUEUE_NAME)
     }
 
     def __init__(self, args):
         super(Worker, self).__init__()
         self._settings = self.parse_arguments(args, self.OPTIONS)
+        self.open_logger("Worker")
+        self._logger.info("Creating an instance of Worker.")
 
     def __enter__(self):
+        self._logger.info("Setting up RabbitMQ channel parameters.")
         self._conn, self._ch = self.open_rabbitmq_channel(
             self._settings["--queue"])
         self._ch.basic_qos(prefetch_count=1)
+        self._logger.info("Done setting up RabbitMQ channel parameters.")
 
         return self
-
-        # if self._settings["--test"]:
-        #     with open(self.DEBUG_WORKER_INPUT_FILE, "r") as fd:
-        #         data = json.load(fd)
-
-        #     for top_site in data:
-        #         try:
-        #             self.download_to_disk(top_site)
-        #         except Exception as e:
-        #             print(f"Failed to download website {top_site['website']}: {e}")
-
-        #     exit(0)
 
     def __exit__(self, exception_type, exception_value, traceback):
         self._ch.close()
         self._conn.close()
 
     def run(self):
-        print(' [*] Waiting for messages. To exit press CTRL+C')
+        self._logger.info("Starting consuming.")
         self._ch.basic_consume(
             queue=self._settings["--queue"], auto_ack=False, on_message_callback=self.callback_rabbitmq)
         self._ch.start_consuming()
+        self._logger.info("Stopped consuming.")
 
     @classmethod
     def download_to_disk(cls, info):
@@ -51,23 +43,27 @@ class Worker(WorkerPoolCommon):
         os.makedirs(dirname, exist_ok=True)
 
         web_page = cls.get_page_content(info['Link'])
-
         with open(info['LocatieDisk'], "w", encoding="utf8") as fd:
             fd.write(web_page)
 
     def callback_rabbitmq(self, ch, method, properties, body):
-        print(" [x] Received %r" % body)
+        self._logger.debug(f"Received '{body.decode('utf-8')}' from queue.")
         message = json.loads(body)
 
         if "action" in message and message["action"] == "STOP":
-            print(" [x] STOP message received. Stopped consuming.")
+            self._logger.info("Received 'stop' task. Stopping consuming.")
             self._ch.stop_consuming()
             return
 
         try:
+            self._logger.debug(
+                f"Downloading main page of {message['Link']} to disk in folder {message['LocatieDisk']}.")
             self.download_to_disk(message)
+            self._logger.debug(
+                f"Done downloading main page of {message['Link']} to disk in folder {message['LocatieDisk']}.")
         except Exception as e:
-            print(f"Failed to download website {message['Link']}: {e}")
+            self._logger.error(
+                f"Failed to download main page of website {message['Link']}: {e}!")
         finally:
             self._ch.basic_ack(delivery_tag=method.delivery_tag)
 
