@@ -7,12 +7,14 @@ from bs4 import BeautifulSoup
 
 from common import WorkerPoolCommon
 
-# TODO(@pciocirlan): improve exceptions
-# TODO(@pciocirlan): PEP documentation
-
 
 class Master(WorkerPoolCommon):
-    # flag -> (argument count, default)
+    """Master class opens workers as subprocesses,
+    crawls alexa.com/topsites for links to most visited sites per country
+    and sends them to localhost RabbitMQ queue.
+    """
+
+    # Option flags for commandline.
     OPTIONS = {
         "--queue": (1, WorkerPoolCommon.DEFAULT_RABBITMQ_QUEUE_NAME),
         "--worker-count": (1, 16)
@@ -21,12 +23,20 @@ class Master(WorkerPoolCommon):
     TOPSITE_URL = "https://www.alexa.com/topsites/"
 
     def __init__(self, args):
-        super(Master, self).__init__()
+        """Initialize Master instance.
+
+        Parse commandline arguments. Open logger session.
+        """
+        super().__init__()
         self._settings = self.parse_arguments(args, self.OPTIONS)
         self.open_logger("Master")
         self._logger.info("Creating an instance of Master.")
 
     def __enter__(self):
+        """Enter context.
+
+        Open connection to RabbitMQ queue and open worker subprocesses.
+        """
         self._logger.info("Connecting to RabbitMQ queue.")
         self._conn, self._ch = self.open_rabbitmq_channel(
             self._settings["--queue"], clear_queue=True)
@@ -46,6 +56,10 @@ class Master(WorkerPoolCommon):
         return self
 
     def __exit__(self, exception_type, exception_value, traceback):
+        """Exit context.
+
+        Close hanging worker processes and RabbitMQ connection.
+        """
         for proc in self._open_subprocesses:
             if proc.poll() is None:
                 proc.terminate()
@@ -65,6 +79,7 @@ class Master(WorkerPoolCommon):
             self._conn.close()
 
     def run(self):
+        """Scrape links to most visited websites per country and send tasks to RabbitMQ queue."""
         self._logger.info(
             "Scraping links to each country's page with top 500 visited websites.")
         try:
@@ -112,21 +127,9 @@ class Master(WorkerPoolCommon):
             proc.wait()
         self._logger.info("Done waiting for workers to finish.")
 
-    def close_subprocesses(self):
-        for proc in self._open_subprocesses:
-            if proc.poll() is None:
-                proc.terminate()
-                self._logger.info(
-                    f"Terminated unfinished worker with pid {proc.pid}.")
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    self._logger.info(
-                        f"Killed unresponding worker with pid {proc.pid}.")
-
     @classmethod
     def get_country_pages_links(cls):
+        """Return links to all countries' top 500 rankings pages."""
         main_page_contents = cls.get_page_content(
             cls.TOPSITE_URL + 'countries')
         parsed_html = BeautifulSoup(main_page_contents, 'html.parser')
@@ -143,6 +146,7 @@ class Master(WorkerPoolCommon):
 
     @classmethod
     def get_top_country_sites(cls, url):
+        """Return links to most visited websites for a country, given by url."""
         top_sites = list()
         country_page_contents = cls.get_page_content(url)
         parsed_html = BeautifulSoup(country_page_contents, 'html.parser')
@@ -156,6 +160,7 @@ class Master(WorkerPoolCommon):
         return top_sites
 
     def send_tasks(self, folder_name, top_sites):
+        """Serialize and send tasks to RabbitMQ queue."""
         jsons = list()
         for rank, website in enumerate(top_sites, 1):
             filename = f"%(index)02d %(website)s.html" % {
@@ -183,6 +188,7 @@ class Master(WorkerPoolCommon):
                 self._logger.debug(f"Sent {obj_json} to queue.")
 
     def send_stop_messages(self):
+        """Send 'STOP' messages to worker subprocesses to signal end of tasks."""
         for _ in range(self._settings["--worker-count"]):
             obj_json = json.dumps({"action": "STOP"})
 
@@ -196,3 +202,5 @@ if __name__ == "__main__":
             master.run()
         except KeyboardInterrupt:
             print('Interrupted.')
+        else:
+            print('Master finished.')

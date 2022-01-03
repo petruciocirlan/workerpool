@@ -6,18 +6,29 @@ from common import WorkerPoolCommon
 
 
 class Worker(WorkerPoolCommon):
-    # flag -> (argument count, default)
+    """Worker class consumes tasks from RabbitMQ queue and
+    downloads website contents to disk, described by each task.
+    """
+
+    # Option flags for commandline.
     OPTIONS = {
         "--queue": (1, WorkerPoolCommon.DEFAULT_RABBITMQ_QUEUE_NAME)
     }
 
     def __init__(self, args):
-        super(Worker, self).__init__()
+        """Initialize Worker instance.
+
+        Parse commandline arguments. Open logger session.
+        """
+        super().__init__()
         self._settings = self.parse_arguments(args, self.OPTIONS)
         self.open_logger("Worker")
         self._logger.info("Creating an instance of Worker.")
 
     def __enter__(self):
+        """Enter context.
+        
+        Open and configure connection to RabbitMQ queue."""
         self._logger.info("Setting up RabbitMQ channel parameters.")
         self._conn, self._ch = self.open_rabbitmq_channel(
             self._settings["--queue"])
@@ -27,10 +38,14 @@ class Worker(WorkerPoolCommon):
         return self
 
     def __exit__(self, exception_type, exception_value, traceback):
+        """Exit context.
+        
+        Close connection to RabbitMQ queue."""
         self._ch.close()
         self._conn.close()
 
     def run(self):
+        """Consume tasks from RabbitMQ queue and download to disk website contents described by tasks."""
         self._logger.info("Starting consuming.")
         self._ch.basic_consume(
             queue=self._settings["--queue"], auto_ack=False, on_message_callback=self.callback_rabbitmq)
@@ -38,15 +53,21 @@ class Worker(WorkerPoolCommon):
         self._logger.info("Stopped consuming.")
 
     @classmethod
-    def download_to_disk(cls, info):
-        dirname = os.path.dirname(info['LocatieDisk'])
+    def download_to_disk(cls, disk_location, link):
+        """Download website content to disk location."""
+        dirname = os.path.dirname(disk_location)
         os.makedirs(dirname, exist_ok=True)
 
-        web_page = cls.get_page_content(info['Link'])
-        with open(info['LocatieDisk'], "w", encoding="utf8") as fd:
+        web_page = cls.get_page_content(link)
+        with open(disk_location, "w", encoding="utf8") as fd:
             fd.write(web_page)
 
     def callback_rabbitmq(self, ch, method, properties, body):
+        """Task handler for RabbitMQ queue consumer.
+        
+        Deserialize task and download website content to disk location as described by task.
+        
+        Stop consumer when 'STOP' task is received."""
         self._logger.debug(f"Received '{body.decode('utf-8')}' from queue.")
         message = json.loads(body)
 
@@ -58,7 +79,7 @@ class Worker(WorkerPoolCommon):
         try:
             self._logger.debug(
                 f"Downloading main page of {message['Link']} to disk in folder {message['LocatieDisk']}.")
-            self.download_to_disk(message)
+            self.download_to_disk(message['LocatieDisk'], message['Link'])
             self._logger.debug(
                 f"Done downloading main page of {message['Link']} to disk in folder {message['LocatieDisk']}.")
         except Exception as e:
@@ -74,3 +95,5 @@ if __name__ == "__main__":
             worker.run()
         except KeyboardInterrupt:
             print('Interrupted.')
+        else:
+            print('Worker finished.')

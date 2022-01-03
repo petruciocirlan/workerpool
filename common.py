@@ -7,11 +7,13 @@ import pika
 
 
 class WorkerPoolCommon:
+    """WorkerPoolCommon class implements methods used by both Master and Worker classes."""
+
     DEFAULT_RABBITMQ_QUEUE_NAME = "WorkerPool"
-    DEBUG_WORKER_INPUT_FILE = "test-rabbitmq-json-example.json"
 
     @staticmethod
     def get_page_content(url):
+        """Return page content of website at given url."""
         response = requests.get(url, timeout=10)
 
         if response.status_code != 200:
@@ -22,6 +24,7 @@ class WorkerPoolCommon:
 
     @staticmethod
     def open_rabbitmq_channel(queue_name=DEFAULT_RABBITMQ_QUEUE_NAME, clear_queue=False):
+        """Open a connection to RabbitMQ on localhost and a channel with new queue (re)declared."""
         connection = pika.BlockingConnection(
             pika.ConnectionParameters(host='localhost'))
         channel = connection.channel()
@@ -35,6 +38,7 @@ class WorkerPoolCommon:
 
     @staticmethod
     def parse_arguments(args, default_options):
+        """Parse commandline arguments, with respect to default options."""
         settings = {}
 
         for option in default_options:
@@ -70,6 +74,7 @@ class WorkerPoolCommon:
         return settings
 
     def open_logger(self, logger_name):
+        """Open logger session with formatted output to both disk and console."""
         self._logger = logging.getLogger(logger_name)
 
         script_directory = os.path.dirname(os.path.realpath(__file__))
