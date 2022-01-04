@@ -6,8 +6,8 @@ from common import WorkerPoolCommon
 
 
 class Worker(WorkerPoolCommon):
-    """Worker class consumes tasks from RabbitMQ queue and
-    downloads website contents to disk, described by each task.
+    """Consume tasks from RabbitMQ queue and
+    download website contents to disk, described by each task.
     """
 
     # Option flags for commandline.
@@ -27,8 +27,9 @@ class Worker(WorkerPoolCommon):
 
     def __enter__(self):
         """Enter context.
-        
-        Open and configure connection to RabbitMQ queue."""
+
+        Open and configure connection to RabbitMQ queue.
+        """
         self._logger.info("Setting up RabbitMQ channel parameters.")
         self._conn, self._ch = self.open_rabbitmq_channel(
             self._settings["--queue"])
@@ -39,10 +40,17 @@ class Worker(WorkerPoolCommon):
 
     def __exit__(self, exception_type, exception_value, traceback):
         """Exit context.
-        
-        Close connection to RabbitMQ queue."""
-        self._ch.close()
-        self._conn.close()
+
+        Close connection to RabbitMQ queue.
+        """
+        if hasattr(self, "_ch") and self._ch.is_open:
+            self._ch.close()
+
+        if hasattr(self, "_conn") and self._conn.is_open:
+            self._conn.close()
+
+        if exception_type is not None:
+            self._logger.warning(f"Interrupted: {exception_type}")
 
     def run(self):
         """Consume tasks from RabbitMQ queue and download to disk website contents described by tasks."""
@@ -64,10 +72,11 @@ class Worker(WorkerPoolCommon):
 
     def callback_rabbitmq(self, ch, method, properties, body):
         """Task handler for RabbitMQ queue consumer.
-        
+
         Deserialize task and download website content to disk location as described by task.
-        
-        Stop consumer when 'STOP' task is received."""
+
+        Stop consumer when 'STOP' task is received.
+        """
         self._logger.debug(f"Received '{body.decode('utf-8')}' from queue.")
         message = json.loads(body)
 
@@ -90,10 +99,8 @@ class Worker(WorkerPoolCommon):
 
 
 if __name__ == "__main__":
-    with Worker(sys.argv[1:]) as worker:
-        try:
+    try:
+        with Worker(sys.argv[1:]) as worker:
             worker.run()
-        except KeyboardInterrupt:
-            print('Interrupted.')
-        else:
-            print('Worker finished.')
+    except:
+        pass

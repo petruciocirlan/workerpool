@@ -3,15 +3,14 @@ import json
 import sys
 import os
 
-from bs4 import BeautifulSoup
-
 from common import WorkerPoolCommon
+from html_parser import CountriesHTMLParser, TopSitesHTMLParser
 
 
 class Master(WorkerPoolCommon):
-    """Master class opens workers as subprocesses,
-    crawls alexa.com/topsites for links to most visited sites per country
-    and sends them to localhost RabbitMQ queue.
+    """Open workers as subprocesses, crawl alexa.com/topsites
+    for links to most visited sites per country
+    and send them as tasks to localhost RabbitMQ queue.
     """
 
     # Option flags for commandline.
@@ -63,20 +62,23 @@ class Master(WorkerPoolCommon):
         for proc in self._open_subprocesses:
             if proc.poll() is None:
                 proc.terminate()
-                self._logger.info(
+                self._logger.debug(
                     f"Terminated unfinished worker with pid {proc.pid}.")
                 try:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     proc.kill()
-                    self._logger.info(
+                    self._logger.debug(
                         f"Killed unresponding worker with pid {proc.pid}.")
 
-        if self._ch.is_open:
+        if hasattr(self, "_ch") and self._ch.is_open:
             self._ch.close()
 
-        if self._conn.is_open:
+        if hasattr(self, "_conn") and self._conn.is_open:
             self._conn.close()
+
+        if exception_type is not None:
+            self._logger.warning(f"Interrupted: {exception_type}")
 
     def run(self):
         """Scrape links to most visited websites per country and send tasks to RabbitMQ queue."""
@@ -94,7 +96,7 @@ class Master(WorkerPoolCommon):
         self._logger.info(
             f"Scraping top 50 links for each country and sending tasks.")
         for link in country_pages_links:
-            self._logger.debug(
+            self._logger.info(
                 f"Scraping links to top sites of country {link['country']}.")
             try:
                 top_sites = self.get_top_country_sites(link['url'])
@@ -102,7 +104,7 @@ class Master(WorkerPoolCommon):
                 self._logger.error(
                     f"Failed to get top 50 most visited websites for country {link['country']}: {e}!")
                 continue
-            self._logger.debug(
+            self._logger.info(
                 f"Done craping links to top sites of country {link['country']}.")
 
             self._logger.info(
@@ -132,30 +134,22 @@ class Master(WorkerPoolCommon):
         """Return links to all countries' top 500 rankings pages."""
         main_page_contents = cls.get_page_content(
             cls.TOPSITE_URL + 'countries')
-        parsed_html = BeautifulSoup(main_page_contents, 'html.parser')
-        country_links = list()
 
-        country_lists = parsed_html.find_all("ul", class_="countries")
-        for country_list in country_lists:
-            links = country_list.find_all("a")
+        country_links = CountriesHTMLParser().extract_links(main_page_contents)
 
-            country_links += [{"country": link.text,
-                               "url": cls.TOPSITE_URL + link['href']} for link in links]
+        # Links are relative; prepend topsite url
+        for index in range(len(country_links)):
+            country_links[index]['url'] = cls.TOPSITE_URL + \
+                country_links[index]['url']
 
         return country_links
 
     @classmethod
     def get_top_country_sites(cls, url):
         """Return links to most visited websites for a country, given by url."""
-        top_sites = list()
         country_page_contents = cls.get_page_content(url)
-        parsed_html = BeautifulSoup(country_page_contents, 'html.parser')
-        site_blocks = parsed_html.find_all("div", class_="site-listing")
 
-        for site_block in site_blocks:
-            site_anchor = site_block.find("a")
-
-            top_sites += [site_anchor.text]
+        top_sites = TopSitesHTMLParser().extract_links(country_page_contents)
 
         return top_sites
 
@@ -169,7 +163,8 @@ class Master(WorkerPoolCommon):
             }
 
             # "topsites/{country}/{index} {website}.html"
-            filepath = os.path.join("topsites", folder_name, filename)
+            filepath = os.path.join(
+                os.getcwd(), "topsites", folder_name, filename)
             website = f"http://{website}"
 
             obj = {
@@ -197,10 +192,8 @@ class Master(WorkerPoolCommon):
 
 
 if __name__ == "__main__":
-    with Master(sys.argv[1:]) as master:
-        try:
+    try:
+        with Master(sys.argv[1:]) as master:
             master.run()
-        except KeyboardInterrupt:
-            print('Interrupted.')
-        else:
-            print('Master finished.')
+    except:
+        pass

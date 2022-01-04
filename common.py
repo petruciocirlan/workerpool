@@ -1,26 +1,27 @@
+import urllib.request
 import logging
 import sys
 import os
 
-import requests
 import pika
 
 
 class WorkerPoolCommon:
-    """WorkerPoolCommon class implements methods used by both Master and Worker classes."""
+    """Methods used by both Master and Worker classes."""
 
     DEFAULT_RABBITMQ_QUEUE_NAME = "WorkerPool"
 
     @staticmethod
     def get_page_content(url):
         """Return page content of website at given url."""
-        response = requests.get(url, timeout=10)
+        response = urllib.request.urlopen(url, timeout=10)
+        content = response.read().decode('UTF-8')
 
-        if response.status_code != 200:
+        if response.status != 200:
             raise Exception(
-                f"Failed to retrieve page contents: status code {response.status_code}")
+                f"Failed to retrieve page contents: status code {response.status_code}. Reason: {response.reason}.")
 
-        return response.text
+        return content
 
     @staticmethod
     def open_rabbitmq_channel(queue_name=DEFAULT_RABBITMQ_QUEUE_NAME, clear_queue=False):
