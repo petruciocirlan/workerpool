@@ -48,7 +48,8 @@ class Master(WorkerPoolCommon):
             script_directory = os.path.dirname(os.path.realpath(__file__))
             worker_script_path = os.path.join(
                 script_directory, "worker.py")
-            proc = subprocess.Popen(["python", worker_script_path])
+            proc = subprocess.Popen(
+                ["python", worker_script_path, "--queue", self._settings["--queue"]])
             self._open_subprocesses.append(proc)
         self._logger.info(f"Done creating {worker_count} workers.")
 

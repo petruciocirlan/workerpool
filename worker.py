@@ -81,6 +81,7 @@ class Worker(WorkerPoolCommon):
         message = json.loads(body)
 
         if "action" in message and message["action"] == "STOP":
+            self._ch.basic_ack(delivery_tag=method.delivery_tag)
             self._logger.info("Received 'stop' task. Stopping consuming.")
             self._ch.stop_consuming()
             return
